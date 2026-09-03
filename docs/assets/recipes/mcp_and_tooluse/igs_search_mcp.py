@@ -11,14 +11,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from enum import Enum, auto
+from functools import partial
 from typing import Any
 
 import boto3
@@ -35,9 +38,14 @@ IGS_REQUEST_TIMEOUT_SEC = 120
 IGS_OBSERVATION_LIMIT = 20_000
 IGS_HIT_TEXT_LIMIT = 3_000
 IGS_MAX_RETURNED_HITS = 10
+IGS_MAX_CONCURRENT_REQUESTS = 100
 _EXPIRED_TOKEN_ERROR_TYPES = frozenset({"ExpiredToken", "ExpiredTokenException"})
 _credential_lock = threading.Lock()
 _credentials: Any = None
+_search_executor = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("IGS_MAX_CONCURRENT_REQUESTS", IGS_MAX_CONCURRENT_REQUESTS)),
+    thread_name_prefix="igs-search",
+)
 
 
 class PostStatus(Enum):
@@ -48,8 +56,17 @@ class PostStatus(Enum):
     ERROR = auto()
 
 
-def igs_search(query: str, query_locale: str = "en-US", accept_language: str = "en-US") -> str:
+async def igs_search(query: str, query_locale: str = "en-US", accept_language: str = "en-US") -> str:
     """Search the web with IGS and return normalized, bounded results."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _search_executor,
+        partial(_igs_search_sync, query, query_locale=query_locale, accept_language=accept_language),
+    )
+
+
+def _igs_search_sync(query: str, query_locale: str = "en-US", accept_language: str = "en-US") -> str:
+    """Execute one blocking IGS request outside the MCP event loop."""
     query = query.strip()
     if not query:
         raise ValueError("query is required")
