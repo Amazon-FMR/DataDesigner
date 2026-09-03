@@ -33,8 +33,14 @@ def parse_json_body(response: httpx.Response, provider_name: str, model_name: st
 
 def wrap_transport_error(exc: Exception, provider_name: str, model_name: str | None) -> ProviderError:
     """Convert transport exceptions into canonical ``ProviderError`` values."""
+    if isinstance(exc, lazy.httpx.TimeoutException):
+        kind = ProviderErrorKind.TIMEOUT
+    elif isinstance(exc, lazy.httpx.TransportError):
+        kind = ProviderErrorKind.API_CONNECTION
+    else:
+        kind = infer_error_kind_from_exception(exc)
     return ProviderError(
-        kind=infer_error_kind_from_exception(exc),
+        kind=kind,
         message=str(exc) or f"Transport error from provider {provider_name!r}",
         provider_name=provider_name,
         model_name=model_name,

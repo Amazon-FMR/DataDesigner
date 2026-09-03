@@ -5,8 +5,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
+from data_designer.engine.models.clients.adapters.http_helpers import wrap_transport_error
 from data_designer.engine.models.clients.errors import (
     ProviderError,
     ProviderErrorKind,
@@ -33,6 +35,31 @@ class StubHttpResponse:
         if self._json_payload is None:
             raise ValueError("No JSON payload")
         return self._json_payload
+
+
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.RemoteProtocolError("server disconnected"),
+        httpx.ReadError("connection reset"),
+        httpx.WriteError("broken pipe"),
+    ],
+)
+def test_wrap_httpx_transport_error_as_api_connection(transport_error: httpx.TransportError) -> None:
+    error = wrap_transport_error(transport_error, provider_name="stub-provider", model_name="stub-model")
+
+    assert error.kind == ProviderErrorKind.API_CONNECTION
+    assert error.__cause__ is transport_error
+
+
+def test_wrap_httpx_timeout_as_timeout() -> None:
+    error = wrap_transport_error(
+        httpx.ConnectTimeout("connection timed out"),
+        provider_name="stub-provider",
+        model_name="stub-model",
+    )
+
+    assert error.kind == ProviderErrorKind.TIMEOUT
 
 
 @pytest.mark.parametrize(
