@@ -47,8 +47,8 @@ Pipeline architecture:
     │  Normalize raw agent output into clean JSON via LLMStructuredColumn.    │
     │  Handles markdown fences, trailing text, single-quoted dicts.           │
     │                                                                         │
-    │  The agent_solution_raw__trace column IS the SFT training data:         │
-    │  complete ChatML conversation with every tool call and response.        │
+    │  The agent_solution_raw__trace column remains in the DataDesigner       │
+    │  artifact for debugging, but is omitted from the final JSONL export.    │
     └─────────────────────────────────────────────────────────────────────────┘
 
 Prerequisites:
@@ -76,7 +76,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 import data_designer.config as dd
-from data_designer.interface import DataDesigner
+from data_designer.interface import DataDesigner, DatasetCreationResults
 
 # =============================================================================
 # Structured Output Schema
@@ -91,6 +91,14 @@ class AgentSolution(BaseModel):
         default_factory=list, description="Authoritative URLs used to verify the answer."
     )
     short_justification: str = Field(..., min_length=1, description="Brief explanation of reasoning (1-2 sentences).")
+
+
+def export_final_jsonl(results: DatasetCreationResults, path: str | Path) -> Path:
+    """Export the final dataset without the internal agent rollout trace."""
+    output_path = Path(path)
+    dataset = results.load_dataset().drop(columns=["agent_solution_raw__trace"], errors="ignore")
+    dataset.to_json(output_path, orient="records", lines=True, force_ascii=False, date_format="iso")
+    return output_path
 
 
 # =============================================================================
@@ -421,7 +429,7 @@ def main() -> None:
         )
         print(f"Persisted {results.count_records()} records under: {results.artifact_storage.base_dataset_path}")
         if args.export_path:
-            export_path = results.export(args.export_path, format="jsonl")
+            export_path = export_final_jsonl(results, args.export_path)
             print(f"Exported dataset to: {export_path}")
     else:
         results = data_designer.preview(config_builder, num_records=args.num_records)
