@@ -375,6 +375,23 @@ def parse_args():
         default=2,
         help="Maximum concurrent requests to the configured model",
     )
+    parser.add_argument(
+        "--max-concurrent-row-groups",
+        type=int,
+        default=3,
+        help="Maximum number of row groups active in the scheduler",
+    )
+    parser.add_argument(
+        "--max-in-flight-tasks",
+        type=int,
+        default=1024,
+        help="Maximum number of scheduler tasks in flight",
+    )
+    parser.add_argument(
+        "--disable-early-shutdown",
+        action="store_true",
+        help="Continue generation when the non-retryable error-rate threshold is exceeded",
+    )
     parser.add_argument("--seed-path", type=str, default=None, help="Path to seed parquet or JSONL file")
     parser.add_argument("--artifact-path", type=str, default=None, help="Path to save artifacts")
     parser.add_argument("--create", action="store_true", help="Persist a complete dataset instead of running a preview")
@@ -420,6 +437,13 @@ def main() -> None:
         artifact_path=args.artifact_path,
         model_providers=[model_provider],
         mcp_providers=[mcp_provider],
+    )
+    data_designer.set_run_config(
+        dd.RunConfig(
+            disable_early_shutdown=args.disable_early_shutdown,
+            max_concurrent_row_groups=args.max_concurrent_row_groups,
+            max_in_flight_tasks=args.max_in_flight_tasks,
+        )
     )
     if args.create:
         results = data_designer.create(
