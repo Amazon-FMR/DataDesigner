@@ -6,7 +6,7 @@
 #     "data-designer",
 # ]
 # ///
-"""Nemotron Super Search Agent Recipe: Trajectories with Tavily Web Search
+"""Nemotron Super Search Agent Recipe: Trajectories with IGS Web Search
 
 Generate multi-turn search agent trajectories where an LLM iteratively
 searches the web, reads results, reasons about evidence, and synthesizes
@@ -35,8 +35,8 @@ Pipeline architecture:
     ├─────────────────────────────────────────────────────────────────────────┤
     │                   STAGE 3: SEARCH TRAJECTORY ROLLOUTS (LLM + MCP)       │
     │                                                                         │
-    │  Thought-Action-Observation loop with live Tavily web search.           │
-    │  ├─ tavily_search tool via hosted MCP endpoint                          │
+    │  Thought-Action-Observation loop with live IGS web search.              │
+    │  ├─ igs_search tool via a local stdio MCP server                        │
     │  ├─ Maximum 25 tool call turns; 300s timeout                            │
     │  ├─ Full trace captured via with_trace=ALL_MESSAGES                     │
     │  └─ Structured JSON output: final_answer, supporting_urls,              │
@@ -52,9 +52,8 @@ Pipeline architecture:
     └─────────────────────────────────────────────────────────────────────────┘
 
 Prerequisites:
-    - TAVILY_API_KEY environment variable (get a free key at https://tavily.com)
-    - OPENAI_API_KEY environment variable for OpenAI provider model aliases.
-    - NVIDIA_API_KEY environment variable for NVIDIA provider model aliases (default model alias is "nvidia-text").
+    - AWS credentials that can assume the configured IGS role.
+    - A local Mantle proxy for Bedrock authentication (default: http://127.0.0.1:3456).
 
 Run:
     # Basic usage with built-in demo seeds (generates 2 trajectories)
@@ -158,10 +157,10 @@ You MUST output ONLY valid JSON matching this exact schema:
 }
 
 AVAILABLE TOOLS:
-You have access to ONE tool called "tavily_search" with parameter: query (string, required).
+You have access to ONE tool called "igs_search" with parameter: query (string, required).
 
 TOOL USAGE RULES:
-1. Exact Tool Name: Always use "tavily_search" (no suffixes or prefixes).
+1. Exact Tool Name: Always use "igs_search" (no suffixes or prefixes).
 2. Exact Args: Only send {"query": "..."} for the tool call.
 3. Maximum 25 tool calls. Budget your searches wisely.
 4. Search Strategy:
@@ -175,7 +174,7 @@ TOOL USAGE RULES:
 
 EXECUTION FLOW:
 1. Read the user's question
-2. Make tool calls using "tavily_search" to gather information
+2. Make tool calls using "igs_search" to gather information
 3. Verify information across multiple sources
 4. Once confident, output the JSON result (no additional text)\
 """
@@ -204,23 +203,25 @@ Input:
 # =============================================================================
 
 
-def build_config(model_alias: str) -> tuple[dd.DataDesignerConfigBuilder, dd.MCPProvider]:
+def build_config(
+    model_alias: str,
+) -> tuple[dd.DataDesignerConfigBuilder, dd.LocalStdioMCPProvider]:
     """Build the Data Designer configuration for search agent trajectory generation.
 
     Returns:
         A tuple of (config_builder, mcp_provider).
     """
-    tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
-    mcp_provider = dd.MCPProvider(
-        name="tavily",
-        endpoint=f"https://mcp.tavily.com/mcp/?tavilyApiKey={tavily_api_key}",
-        provider_type="streamable_http",
+    server_path = Path(__file__).with_name("igs_search_mcp.py").resolve()
+    mcp_provider = dd.LocalStdioMCPProvider(
+        name="igs",
+        command="uv",
+        args=["run", str(server_path)],
     )
 
     tool_config = dd.ToolConfig(
-        tool_alias="tavily-search",
-        providers=["tavily"],
-        allow_tools=["tavily_search"],
+        tool_alias="igs-search",
+        providers=["igs"],
+        allow_tools=["igs_search"],
         max_tool_call_turns=25,
         timeout_sec=300.0,
     )
@@ -252,7 +253,7 @@ def build_config(model_alias: str) -> tuple[dd.DataDesignerConfigBuilder, dd.MCP
             model_alias=model_alias,
             system_prompt=AGENT_SYSTEM_PROMPT,
             prompt="Problem: {{ user_query_obfuscated }}",
-            tool_alias="tavily-search",
+            tool_alias="igs-search",
             with_trace=dd.TraceType.ALL_MESSAGES,
         )
     )
@@ -352,24 +353,31 @@ def parse_args():
     """Parse command line arguments."""
     from argparse import ArgumentParser
 
-    parser = ArgumentParser(description="Generate search agent trajectories using Tavily web search via MCP.")
-    parser.add_argument("--model-alias", type=str, default="nvidia-text", help="Model alias to use for generation")
+    parser = ArgumentParser(description="Generate search agent trajectories using IGS web search via MCP.")
+    parser.add_argument("--model-alias", type=str, default="bedrock-opus", help="Model alias to use for generation")
+    parser.add_argument(
+        "--bedrock-proxy-url",
+        default=os.environ.get("BEDROCK_PROXY_URL", "http://127.0.0.1:3456"),
+        help="Local Mantle proxy base URL",
+    )
     parser.add_argument("--num-records", type=int, default=2, help="Number of trajectories to generate")
+    parser.add_argument(
+        "--max-parallel-requests",
+        type=int,
+        default=2,
+        help="Maximum concurrent requests to the configured model",
+    )
     parser.add_argument("--seed-path", type=str, default=None, help="Path to seed parquet or JSONL file")
     parser.add_argument("--artifact-path", type=str, default=None, help="Path to save artifacts")
+    parser.add_argument("--create", action="store_true", help="Persist a complete dataset instead of running a preview")
+    parser.add_argument("--dataset-name", type=str, default="search_agent", help="Dataset name used in create mode")
+    parser.add_argument("--export-path", type=str, default=None, help="Optional JSONL export path for create mode")
     return parser.parse_args()
 
 
 def main() -> None:
     """Main entry point for the demo."""
     args = parse_args()
-
-    if os.environ.get("TAVILY_API_KEY") is None:
-        raise RuntimeError("TAVILY_API_KEY must be set. Get a free key at https://tavily.com")
-
-    if os.environ.get("NVIDIA_API_KEY") is None and args.model_alias.startswith("nvidia"):
-        raise RuntimeError("NVIDIA_API_KEY must be set when using NVIDIA model aliases.")
-
     if args.seed_path:
         seed_path = args.seed_path
     else:
@@ -378,18 +386,50 @@ def main() -> None:
         print(f"Using demo seeds in: {demo_dir}")
 
     config_builder, mcp_provider = build_config(model_alias=args.model_alias)
+    config_builder.add_model_config(
+        dd.ModelConfig(
+            alias="bedrock-opus",
+            model="anthropic.claude-opus-4-8",
+            provider="bedrock-mantle",
+            inference_parameters=dd.ChatCompletionInferenceParams(
+                max_tokens=4_096,
+                max_parallel_requests=args.max_parallel_requests,
+                timeout=300,
+            ),
+        )
+    )
     config_builder.with_seed_dataset(
         dd.LocalFileSeedSource(path=seed_path),
         sampling_strategy=dd.SamplingStrategy.SHUFFLE,
     )
 
-    data_designer = DataDesigner(artifact_path=args.artifact_path, mcp_providers=[mcp_provider])
-    preview_results = data_designer.preview(config_builder, num_records=args.num_records)
+    model_provider = dd.ModelProvider(
+        name="bedrock-mantle",
+        endpoint=f"{args.bedrock_proxy_url.rstrip('/')}/anthropic/v1",
+        provider_type="anthropic",
+    )
+    data_designer = DataDesigner(
+        artifact_path=args.artifact_path,
+        model_providers=[model_provider],
+        mcp_providers=[mcp_provider],
+    )
+    if args.create:
+        results = data_designer.create(
+            config_builder,
+            num_records=args.num_records,
+            dataset_name=args.dataset_name,
+        )
+        print(f"Persisted {results.count_records()} records under: {results.artifact_storage.base_dataset_path}")
+        if args.export_path:
+            export_path = results.export(args.export_path, format="jsonl")
+            print(f"Exported dataset to: {export_path}")
+    else:
+        results = data_designer.preview(config_builder, num_records=args.num_records)
 
     print("\n" + "=" * 60)
     print("GENERATED SEARCH AGENT TRAJECTORIES")
     print("=" * 60)
-    preview_results.display_sample_record()
+    results.display_sample_record()
 
 
 if __name__ == "__main__":
