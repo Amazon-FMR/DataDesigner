@@ -223,7 +223,7 @@ def _truncate(output: str) -> str:
 
 def main() -> None:
     """Run the IGS tool over stdio."""
-    server = FastMCP("igs-search")
+    server = FastMCP("igs-search", log_level="WARNING")
     server.tool()(igs_search)
     server.run(transport="stdio")
 
