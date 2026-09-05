@@ -51,6 +51,11 @@ Pipeline architecture:
     │  artifact for debugging, but is omitted from the final JSONL export.    │
     └─────────────────────────────────────────────────────────────────────────┘
 
+Pass --riddle-only to stop after stage 2: stages 3 and 4 are never configured, so no
+rollouts happen (and with no column referencing the tool alias, the MCP server is
+never started). The JSONL export then carries the seed columns plus user_query_draft
+and user_query_obfuscated (no agent_solution_raw, no agent_solution).
+
 Prerequisites:
     - AWS credentials that can assume the configured IGS role.
     - A local Mantle proxy for Bedrock authentication (default: http://127.0.0.1:3456).
@@ -61,6 +66,9 @@ Run:
 
     # Use a custom seed parquet
     uv run search_agent.py --seed-path /path/to/seeds.parquet --num-records 10
+
+    # Riddles only: stop after stage 2, no rollouts, no MCP server
+    uv run search_agent.py --riddle-only --create --export-path riddles.jsonl
 
     # For help message and available options
     uv run search_agent.py --help
@@ -213,8 +221,15 @@ Input:
 
 def build_config(
     model_alias: str,
+    riddle_only: bool = False,
 ) -> tuple[dd.DataDesignerConfigBuilder, dd.LocalStdioMCPProvider]:
     """Build the Data Designer configuration for search agent trajectory generation.
+
+    Args:
+        model_alias: Model alias used by every LLM column.
+        riddle_only: Stop after stage 2 (search riddle generation), skipping the
+            trajectory rollouts and structured formatting. No column then references
+            the tool alias, so the MCP server is never started.
 
     Returns:
         A tuple of (config_builder, mcp_provider).
@@ -253,6 +268,9 @@ def build_config(
             prompt=OBFUSCATE_PROMPT,
         )
     )
+
+    if riddle_only:
+        return config_builder, mcp_provider
 
     # Stage 3: Agent trajectory with MCP tool calling
     config_builder.add_column(
@@ -397,6 +415,14 @@ def parse_args():
     parser.add_argument("--create", action="store_true", help="Persist a complete dataset instead of running a preview")
     parser.add_argument("--dataset-name", type=str, default="search_agent", help="Dataset name used in create mode")
     parser.add_argument("--export-path", type=str, default=None, help="Optional JSONL export path for create mode")
+    parser.add_argument(
+        "--riddle-only",
+        action="store_true",
+        help=(
+            "Stop after stage 2 (search riddle generation): no trajectory rollouts, no MCP server. "
+            "The export keeps the seed columns plus user_query_draft and user_query_obfuscated."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -410,7 +436,7 @@ def main() -> None:
         seed_path = str(write_demo_seeds(demo_dir))
         print(f"Using demo seeds in: {demo_dir}")
 
-    config_builder, mcp_provider = build_config(model_alias=args.model_alias)
+    config_builder, mcp_provider = build_config(model_alias=args.model_alias, riddle_only=args.riddle_only)
     config_builder.add_model_config(
         dd.ModelConfig(
             alias="bedrock-opus",
@@ -459,7 +485,7 @@ def main() -> None:
         results = data_designer.preview(config_builder, num_records=args.num_records)
 
     print("\n" + "=" * 60)
-    print("GENERATED SEARCH AGENT TRAJECTORIES")
+    print("GENERATED SEARCH RIDDLES" if args.riddle_only else "GENERATED SEARCH AGENT TRAJECTORIES")
     print("=" * 60)
     results.display_sample_record()
 
